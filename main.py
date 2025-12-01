@@ -44,6 +44,31 @@ def obtener_lista_productos():
             conn.close()
     return lista
 
+# --- FUNCIÓN AUXILIAR PARA CARGAR CATEGORÍAS ---
+def obtener_categorias():
+    conn = get_connection()
+    categorias = []
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT nombre FROM categorias ORDER BY nombre")
+                rows = cur.fetchall()
+                categorias = [row[0] for row in rows]
+        except Exception as e:
+            # Fallback: si la tabla 'categorias' no existe, usar categorías distintas desde 'productos'
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT DISTINCT categoria FROM productos WHERE categoria IS NOT NULL ORDER BY categoria")
+                    rows = cur.fetchall()
+                    categorias = [row[0] for row in rows]
+                if not categorias:
+                    st.info("Aún no hay categorías registradas.")
+            except Exception as e2:
+                st.error(f"Error cargando categorías: {e2}")
+        finally:
+            conn.close()
+    return categorias
+
 # --- INTERFAZ PRINCIPAL ---
 st.title("🚀 Sistema de Inventario Automatizado")
 
@@ -125,18 +150,39 @@ elif menu == "📝 Registrar (Manual)":
 
     conn = get_connection()
     lista_prods = obtener_lista_productos()
+
+    # Reset seguro de formulario usando flag + rerun
+    if st.session_state.get("mov_reset", False):
+        st.session_state["mov_producto"] = lista_prods[0] if lista_prods else ""
+        st.session_state["mov_tipo"] = "ENTRADA"
+        st.session_state["mov_fecha"] = date.today()
+        st.session_state["mov_cantidad"] = 1
+        st.session_state["mov_valor"] = 0.00
+        st.session_state.pop("mov_reset")
+
+    # Inicializar estados por defecto antes de crear widgets
+    if "mov_producto" not in st.session_state:
+        st.session_state["mov_producto"] = lista_prods[0] if lista_prods else ""
+    if "mov_tipo" not in st.session_state:
+        st.session_state["mov_tipo"] = "ENTRADA"
+    if "mov_fecha" not in st.session_state:
+        st.session_state["mov_fecha"] = date.today()
+    if "mov_cantidad" not in st.session_state:
+        st.session_state["mov_cantidad"] = 1
+    if "mov_valor" not in st.session_state:
+        st.session_state["mov_valor"] = 0.00
     
     with st.form("form_movimiento"):
         col1, col2 = st.columns(2)
         
         with col1:
-            producto_seleccionado = st.selectbox("Buscar Producto", lista_prods) if lista_prods else st.selectbox("Sin conexión", [])
-            tipo = st.selectbox("Tipo", ["ENTRADA", "SALIDA"])
-            fecha = st.date_input("Fecha", date.today())
+            producto_seleccionado = st.selectbox("Buscar Producto", lista_prods, key="mov_producto") if lista_prods else st.selectbox("Sin conexión", [], key="mov_producto")
+            tipo = st.selectbox("Tipo", ["ENTRADA", "SALIDA"], key="mov_tipo")
+            fecha = st.date_input("Fecha", key="mov_fecha")
         
         with col2:
-            cantidad = st.number_input("Cantidad", min_value=1, value=1)
-            valor = st.number_input("Valor Unitario ($)", min_value=0.00, value=0.00, step=0.1)
+            cantidad = st.number_input("Cantidad", min_value=1, key="mov_cantidad")
+            valor = st.number_input("Valor Unitario ($)", min_value=0.00, step=0.1, key="mov_valor")
 
         btn_guardar = st.form_submit_button("💾 Registrar Transacción", type="primary")
 
@@ -153,6 +199,9 @@ elif menu == "📝 Registrar (Manual)":
                     )
                     # No hace falta commit manual si autocommit=True en la conexión
                     st.toast(f"✅ Éxito: {tipo} de {sku_real} registrado.", icon="🎉")
+                    # Limpiar campos automáticamente de forma segura
+                    st.session_state["mov_reset"] = True
+                    st.rerun()
             except psycopg.errors.RaiseException as e:
                 st.error(f"⛔ {e.diag.message_primary}")
             except Exception as e:
@@ -210,21 +259,68 @@ elif menu == "📂 Carga Masiva (CSV)":
 # ==============================================================================
 elif menu == "⚙️ Gestión Productos":
     st.header("Catálogo Maestro")
-    
+    categorias = obtener_categorias()
+
+    # Reset seguro de formulario de producto
+    if st.session_state.get("prod_reset", False):
+        st.session_state["prod_sku"] = ""
+        st.session_state["prod_nombre"] = ""
+        st.session_state["prod_min_stock"] = 5
+        # reset categoría según modo
+        if st.session_state.get("prod_use_new_cat", False):
+            st.session_state["prod_cat_new"] = ""
+        else:
+            if categorias:
+                st.session_state["prod_cat_selected"] = categorias[0]
+        st.session_state.pop("prod_reset")
+
+    # Inicializar estados por defecto antes de crear widgets
+    if "prod_sku" not in st.session_state:
+        st.session_state["prod_sku"] = ""
+    if "prod_nombre" not in st.session_state:
+        st.session_state["prod_nombre"] = ""
+    if "prod_min_stock" not in st.session_state:
+        st.session_state["prod_min_stock"] = 5
+    if "prod_use_new_cat" not in st.session_state:
+        st.session_state["prod_use_new_cat"] = False
+    if "prod_cat_selected" not in st.session_state and categorias:
+        st.session_state["prod_cat_selected"] = categorias[0]
+    if "prod_cat_new" not in st.session_state:
+        st.session_state["prod_cat_new"] = ""
+
+    # Selector de categoría fuera del formulario para rerender inmediato
+    ccat1, ccat2 = st.columns(2)
+    modo_cat = ccat2.radio("Categoría", options=["Usar existente", "Crear nueva"], index=1 if st.session_state.get("prod_use_new_cat", False) else 0, key="prod_modo_cat")
+    use_new_cat = modo_cat == "Crear nueva"
+    if use_new_cat:
+        st.session_state["prod_use_new_cat"] = True
+        cat_new = ccat2.text_input("Nombre de nueva categoría", key="prod_cat_new")
+        cat_selected = None
+    else:
+        st.session_state["prod_use_new_cat"] = False
+        cat_selected = ccat2.selectbox("Selecciona categoría existente", options=categorias if categorias else ["(sin categorías)"] , index=0 if categorias else 0, key="prod_cat_selected")
+        cat_new = None
+
     with st.form("nuevo_prod"):
         c1, c2 = st.columns(2)
-        sku = c1.text_input("SKU").strip()
-        cat = c2.text_input("Categoría")
-        nom = st.text_input("Nombre Producto")
-        min_stock = st.slider("Stock Mínimo para Alerta", 1, 50, 5)
+        sku = c1.text_input("SKU", key="prod_sku").strip()
+        nom = st.text_input("Nombre Producto", key="prod_nombre")
+        min_stock = st.slider("Stock Mínimo para Alerta", 1, 50, key="prod_min_stock")
         
         if st.form_submit_button("Guardar Producto"):
             try:
-                conn = get_connection()
-                with conn.cursor() as cur:
-                    cur.execute("CALL sp_gestionar_producto(%s, %s, %s, %s::INT)", 
-                                (sku, cat, nom, min_stock))
-                conn.close()
-                st.success("Producto guardado.")
+                categoria_final = cat_new.strip() if use_new_cat and cat_new else cat_selected
+                if not categoria_final:
+                    st.error("Selecciona una categoría o ingresa una nueva.")
+                else:
+                    conn = get_connection()
+                    with conn.cursor() as cur:
+                        cur.execute("CALL sp_gestionar_producto(%s, %s, %s, %s::INT)", 
+                                    (sku, categoria_final, nom, min_stock))
+                    conn.close()
+                    st.success("Producto guardado.")
+                    # Limpiar campos del formulario de forma segura
+                    st.session_state["prod_reset"] = True
+                    st.rerun()
             except Exception as e:
                 st.error(str(e))
